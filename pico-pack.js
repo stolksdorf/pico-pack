@@ -2,203 +2,77 @@ const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 
-let Cache = {};
-let Global = {};
+const hash = (str)=>[...str].reduce((acc, char)=>{acc = ((acc<<5)-acc)+char.charCodeAt(0);return acc&acc; }, 0).toString(32);
 
-const debounce = (fn, t=16)=>function(...args){clearTimeout(this.clk);this.clk = setTimeout(()=>fn(...args), t);};
-const getModuleId = require('./minihash.js');
-const defaultTransforms = require('./default.transforms.js')
-
-const getModuleCode = (filepath, transforms={})=>{
-	const code = fs.readFileSync(filepath, 'utf8');
-	const func = transforms[path.extname(filepath)] || transforms['*'];
-	return func ? func(code, filepath) : code;
+const baseTransforms = {
+	'.json' : (code, filename)=>`module.exports=${code};`,
+	'.js'   : (code, filename)=>code,
+	'*'     : (code, filename)=>`module.exports=\`${code}\`;`
 };
 
 
 
-////////////////
+module.exports = (entryFilePath, opts={})=>{
+	let modules = {}, Global = {}, cache={};
+	opts.transforms = {
+		...baseTransforms,
+		...(opts.transforms||{})
+	};
+	opts.name = opts.name || 'main';
 
-const map = (obj,fn)=>Object.entries(obj).map(([k,v])=>fn(v,k));
+	const getCode = (filepath, )=>{
+		const code = fs.readFileSync(filepath, 'utf8');
+		const func = opts.transforms[path.extname(filepath)] || opts.transforms['*'];
+		return func ? func(code, filepath, cache) : code;
+	};
 
-const builtins = {
-	'process' : require.resolve('process/browser.js')
-};
-
-
-const BuiltinIds = {};
-
-const cacheBuiltins = (opts)=>{
-	map(builtins, (reqPath, name)=>{
-		const res = updateCache(reqPath, opts);
-		BuiltinIds[name] = res.id
-	});
-};
-
-//////////////////
-
-
-//TODO: Wrap all of this in a closure for module scope
-
-const defaultOpts = (opts)=>{
-	return {
-		...opts,
-		transforms : {...defaultTransforms, ...opts.transforms},
-		name : opts.name || 'main',
-	}
-};
-
-const getModule = (filepath)=>{
-	const id = getModuleId(filepath);
-	if(Cache[id]) return Cache[id];
-	return {
-		id,
-		filepath,
-		code : null,
-		export : null,
-		deps : {},
-		dependants: new Set()
-	}
-};
-
-//Move out to a file
-const createContext = (reqFunc)=>{
-	return {
-		global  : Global,
-		window  : Global,
-		document  : Global,
-		navigator : {},
-		module  : {exports:{}},
-		exports : {},
-		require: reqFunc,
-		console, setTimeout, setInterval, clearInterval,
-		process
-		//TODO: there might be more things you need
-	}
-}
-
-const updateCache = (entryPoint, opts)=>{
-	const packFile = (filepath, requiringId=false)=>{
-		const mod = getModule(filepath);
-		if(requiringId) mod.dependants.add(requiringId);
-		if(mod.code) return mod;
+	const pack = (filepath, requiringId=false)=>{
+		let mod = { id : hash(filepath), deps : {}, filepath };
+		if(modules[mod.id]) return modules[mod.id];
 		mod.code = getModuleCode(filepath, opts.transforms);
-		const sandbox = createContext((reqPath)=>{
-			const absPath = require.resolve(reqPath, {paths: [path.dirname(mod.filepath)]});
-			const requiredModule = packFile(absPath, mod.id);
-			mod.deps[reqPath] = requiredModule.id;
-			return requiredModule.export;
+		const context = {
+			module  : {exports:{}}, exports : {},
+			global : Global,
+			console, setTimeout, setInterval, clearInterval, process,
+			require: (reqPath)=>{
+				const reqMod = pack(require.resolve(reqPath, {paths: [path.dirname(filepath)]}), mod.id);
+				mod.deps[reqPath] = reqMod.id;
+				return reqMod.export;
+			},
+		};
+		vm.runInNewContext(mod.code, context, {
+			filename : filepath,
+			importModuleDynamically : (a,b)=>{ console.log(a); console.log(b); }
 		});
-		vm.runInNewContext(mod.code, sandbox, {filename : filepath,
-			importModuleDynamically : (a,b)=>{
-				console.log(a);
-				console.log(b);
-			}
-		});
-		mod.export = sandbox.module.exports;
-		Cache[mod.id] = mod;
+		mod.export = context.module.exports;
+		modules[mod.id] = mod;
 		return mod;
-	}
-	return packFile(entryPoint);
-};
+	};
 
-const makeBundle = (entryId, modules, exportName = 'main')=>{
-	const modsAsString = '{' + Object.values(modules).map((mod)=>{
-		return `"${mod.id}":[function(require, module, exports, global){${mod.code}\n},${JSON.stringify(mod.deps)}]`
-	}).join(',') + '}';
+	const root = pack(require.resolve(entryFilePath));
 
-	return `(function(entryId, modules){
-	let c = {};
-	let g = this;
-	if(typeof self !== "undefined") g = self;
-	if(typeof global !== "undefined") g = global;
-	if(typeof window !== "undefined") g = window;
+	const modsAsString = Object.values(modules).map((mod)=>{
+		return `global.Modules["${mod.id}"]={func:function(module, exports, global, require){${mod.code}\n},deps:${JSON.stringify(mod.deps)}};`
+	}).join('\n');
+
+	const bundle = `
+if(typeof window !=='undefined') global=window;
+global.Modules = global.Modules||{};
+${modsAsString}
+(function(){
 	const req = (id)=>{
-		if(c[id]) return c[id];
+		if(global.Modules[id].ran) return global.Modules[id].export;
 		let m = {exports : {}};
-		modules[id][0].call(m.exports, (reqPath)=>req(modules[id][1][reqPath]), m, m.exports, g);
-		c[id] = m.exports;
-		return m.exports;
+		global.Modules[id].func(m,m.exports,global,(reqPath)=>req(global.Modules[id].deps[reqPath]));
+		global.Modules[id].ran = true;
+		global.Modules[id].export = m.exports;
+		return global.Modules[id].exports;
 	}
-
-
-	${map(cacheBuiltins, (id, name)=>{
-		return `g.${name} = req('${id}');`
-	}).join('\n')}
-
-
-	if (typeof exports === "object" && typeof module !== "undefined") {
-		module.exports = req(entryId);
+	if(typeof module === 'undefined'){
+		global['${opts.name}'] = req('${root.id}');
 	}else{
-		g['${exportName}'] = req(entryId);
+		module.exports = req('${root.id}');
 	}
-})("${entryId}", ${modsAsString});`;
-};
-
-const filterDependantModules = (id)=>{
-	return Cache; //Temp, until I figure out builtins
-
-
-	let result = {};
-	const run = (id)=>{
-		if(result[id] || !Cache[id]) return;
-		result[id] = Cache[id];
-		Object.values(result[id].deps).map(run);
-	};
-	run(id);
-	return result;
-};
-
-const watch = (modules, entryPoint, func, opts={})=>{
-	const repack = debounce(()=>{
-		try{
-			const {id, export: execute } = updateCache(entryPoint, opts);
-			const bundle = makeBundle(id, filterDependantModules(id), opts.name);
-			func({bundle, execute});
-		}catch(err){
-			//TODO: make this better
-			console.log(err);
-		}
-	});
-	Object.values(modules).map((mod)=>{
-		fs.watch(mod.filepath, ()=>{
-			invalidate(mod.filepath);
-			repack();
-		});
-	});
-	repack();
-};
-
-const pack = (entryPoint, opts={})=>{
-	entryPoint = require.resolve(entryPoint);
-	opts = defaultOpts(opts);
-
-	cacheBuiltins(opts);
-
-	const entryMod = updateCache(require.resolve(entryPoint), opts);
-	const neededModules = filterDependantModules(entryMod.id);
-
-	if(typeof opts.dev === 'function'){
-		watch(neededModules, entryPoint, opts.dev, opts);
-	}
-
-	return {
-		bundle  : makeBundle(entryMod.id, neededModules, opts.name),
-		execute : entryMod.export
-	};
-};
-
-const invalidate = (filepath)=>{
-	const run = (id)=>{
-		if(!Cache[id]) return;
-		Array.from(Cache[id].dependants).map(run);
-		delete Cache[id];
-	}
-	return run(getModuleId(require.resolve(filepath)));
-};
-
-module.exports = {
-	pack,
-	invalidate,
-	cache : Cache
+})();`
+	return { bundle, modules, cache, exports : root.export }
 }

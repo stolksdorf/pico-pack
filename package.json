@@ -1,19 +1,15 @@
 {
   "name": "pico-pack",
-  "version": "1.0.0",
-  "description": "",
+  "version": "0.0.0",
+  "description": "Experiments in creating my own lightweight bundler",
   "main": "pico-pack.js",
+  "directories": {
+    "test": "tests"
+  },
   "scripts": {
-    "test": "pico-check",
-    "test:dev": "pico-check -w"
+    "test": "node tests/pack.test.js"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@babel/core": "^7.9.0"
-  },
-  "devDependencies": {
-    "pico-check": "^1.2.2"
-  }
+  "author": "stolksdorf <scott.tolksdorf@gmail.com> (https://stolksdorf.dev/)",
+  "license": "MIT"
 }

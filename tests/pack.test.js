@@ -1,5 +1,4 @@
-const pack = require('../pico-pack2.js');
-
+const pack = require('../pico-pack.js');
 const fs = require('fs');
 
 

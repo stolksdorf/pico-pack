@@ -1,7 +1,3 @@
 node_modules
-build
-config/local.*
-.DS_Store
 todo.md
 temp
-*.temp.js

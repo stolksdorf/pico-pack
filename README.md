@@ -22,8 +22,31 @@ anti-features: (things I removed for simplicity)
 
 
 
-#### Todo
 
-- Test out how `import` owkrs in the browser
-	- Can we caputre imports using `vm`?
-	- Can we fake out `imports` in the packed harness in the browser?
+### Custom transforms with Cache example
+
+```js
+
+const {bundle, cache, export} = pack('/path/to/component.js', {
+	transforms : {
+		'.css' : (code, fp, cache)=>{
+			cache.css = cache.css || {}
+			cache.css[fp] = parseCSS(code);
+			return '';
+		}
+	}
+});
+
+const resultHTML = `
+<html>
+	<head>
+		<style>${genCSS(cache.css)}</style>
+		<script>${bundle}</script>
+	</head>
+	<body>
+		${render(export())}
+	</body>
+</html>
+`
+
+```
