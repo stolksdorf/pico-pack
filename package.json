@@ -1,0 +1,19 @@
+{
+  "name": "pico-pack",
+  "version": "1.0.0",
+  "description": "",
+  "main": "pico-pack.js",
+  "scripts": {
+    "test": "pico-check",
+    "test:dev": "pico-check -w"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@babel/core": "^7.9.0"
+  },
+  "devDependencies": {
+    "pico-check": "^1.2.2"
+  }
+}
