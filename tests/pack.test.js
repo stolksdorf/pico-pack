@@ -6,7 +6,7 @@ const fs = require('fs');
 
 console.log('here');
 
-const res = pack('./tests/test_files/bar.js', {
+const res = pack('./test_files/bar.js', {
 	//opts
 	//name : 'foo'
 	//transforms : {},

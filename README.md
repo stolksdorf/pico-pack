@@ -50,3 +50,24 @@ const resultHTML = `
 `
 
 ```
+
+
+### Sample Module Entry
+
+```js
+{
+	234463 : {
+		id : '234463',
+		deps : {
+			{ './doot.js': '-2rg5hu' },
+		},
+		upstream : <Set of ids>
+		filepath : 'C:/root/pico-pack/tests/test_files/bar.js',
+		code : '...',
+		export : <func>
+	}
+}
+
+
+
+```
