@@ -12,13 +12,18 @@ const res = pack('./test_files/bar.js', {
 	//transforms : {},
 	//watch : ()=>{}
 
+	watch : (res)=>{
+		console.log('WATCH TRIGGER', res.export())
+
+	}
+
 });
 
 fs.writeFileSync('./temp/src.packed.js', res.bundle);
 console.log('packed');
 //console.log('result func:', res.func, func());
 
-console.log(res.modules)
+
 
 
 

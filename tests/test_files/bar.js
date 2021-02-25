@@ -4,6 +4,8 @@ const wooo = require('./doot.js');
 
 //module.exports = 7 + global.goo;
 module.exports = ()=>{
-	console.log('calling bar')
-	return 7 + wooo + global.foo
+	console.log('calling bar', process.env.NODE_ENV)
+
+	console.log(setTimeout)
+	return wooo + global.foo + 5
 };
