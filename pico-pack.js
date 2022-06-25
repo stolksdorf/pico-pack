@@ -2,30 +2,44 @@ const vm   = require('vm');
 const fs   = require('fs');
 const path = require('path');
 
-const hash = (str)=>[...str].reduce((acc, char)=>{acc = ((acc<<5)-acc)+char.charCodeAt(0);return acc&acc; }, 0).toString(32);
-
 const baseTransforms = {
-	'.json' : (code, filename)=>`module.exports=${code};`,
-	'.js'   : (code, filename)=>code,
-	'*'     : (code, filename)=>`module.exports=\`${code}\`;`
+	'.json' : (code, filename, global)=>`module.exports=${code};`,
+	'.js'   : (code, filename, global)=>code,
+	'*'     : (code, filename, global)=>`module.exports=\`${code}\`;`
 };
 
-const builtins = { console, setTimeout, setInterval, clearInterval, process }
+const fixSlash = (str)=>str.replace(/\\/g, '/').replace(/\\\\/g, '/')
+const Emitter=()=>{
+	let cache={};
+	return {
+		emit : (evt, ...args)=>(cache[evt]||[]).map(fn=>fn(...args)),
+		on : (evt, func)=>{
+			cache[evt]=(cache[evt]||[]).concat(func);
+			return ()=>cache[evt]=cache[evt].filter(x=>x!=func);
+		}
+	};
+};
 
-const debounce = (fn)=>{ let timeout; return (...args)=>{ clearInterval(timeout); timeout = setTimeout(()=>fn(...args), 50); }; };
-const resolveFrom = (fp, base)=>require.resolve(fp, {paths: [path.dirname(base)]})
+
+
+const builtins = { console, setTimeout, setInterval, clearInterval, process };
+
+const noop = (x)=>x;
+const hash = (s)=>{for(var i=0,h=9;i<s.length;)h=Math.imul(h^s.charCodeAt(i++),9**9);return (h^h>>>9).toString(32)};
+const debounce = (fn, time=50)=>{ let timeout; return (...args)=>{ clearInterval(timeout); timeout = setTimeout(()=>fn(...args), time); }; };
+const resolveFrom = (fp, base)=>require.resolve(fp, {paths:[path.dirname(base)]})
 const getCaller = (offset=0)=>{
 	const [_, name, file, line, col] =
 		/    at (.*?) \((.*?):(\d*):(\d*)\)/.exec((new Error()).stack.split('\n')[3 + offset]);
 	return { name, file, line : Number(line), col  : Number(col) };
 };
 
-const picopack = (entryFilePath, modules, opts={})=>{
+const picopack = (entryFilePath, modules={}, opts={})=>{
 	const getCode = (filepath)=>{
 		const code = fs.readFileSync(filepath, 'utf8');
-		const funcKey = Object.keys(opts.transforms).find(key=>filepath.endsWith(key)) || '*';
-		const func = opts.transforms[funcKey];
-		return func ? func(code, filepath, opts.global) : code;
+		const key = Object.keys(opts.transforms).find(key=>filepath.endsWith(key)) || '*';
+		const transform = opts.transforms[key] || noop;
+		return transform(code, filepath, opts.global);
 	};
 
 	const pack = (filepath, requiringId)=>{
@@ -34,24 +48,35 @@ const picopack = (entryFilePath, modules, opts={})=>{
 			modules[id].upstream.add(requiringId);
 			return modules[id];
 		}
-		let mod = { id, deps : {}, filepath, upstream : new Set([requiringId]), code: getCode(filepath) };
-		//if(requiringId) mod.upstream.add(requiringId);
+		let mod = {
+			id, filepath,
+			fn       : fixSlash(path.relative(process.cwd(), filepath)),
+			root     : fixSlash(path.relative(path.dirname(filepath), process.cwd())),
+			deps     : {},
+			upstream : new Set([requiringId]),
+			code     : getCode(filepath)
+		};
 		const context = {
 			module  : {exports:{}}, exports : {},
+			__filename : mod.fn, __dirname : path.dirname(mod.fn), __root : mod.root,
 			global  : opts.global,
 			...builtins,
-
-			//console, setTimeout, setInterval, clearInterval, process,
-
 			require: (reqPath)=>{
-				//const reqMod = pack(require.resolve(reqPath, {paths: [path.dirname(filepath)]}), mod.id);
-				const reqMod = pack(resolveFrom(reqPath, filepath), mod.id);
-				mod.deps[reqPath] = reqMod.id;
-				return reqMod.export;
+				try{
+					const reqMod = pack(resolveFrom(reqPath, filepath), mod.id);
+					mod.deps[reqPath] = reqMod.id;
+					return reqMod.export;
+				}catch(err){
+					console.log(err)
+				}
 			},
 		};
-		vm.runInNewContext(mod.code, context, { filename : filepath });
-		mod.export = context.module.exports;
+		try{
+			vm.runInNewContext(mod.code, context, { filename : filepath });
+			mod.export = context.module.exports;
+		}catch(err){
+			console.log(err)
+		}
 		modules[mod.id] = mod;
 		return mod;
 	};
@@ -59,58 +84,64 @@ const picopack = (entryFilePath, modules, opts={})=>{
 	const root = pack(entryFilePath);
 
 	const modsAsString = Object.values(modules).map((mod)=>{
-		return `global.Modules["${mod.id}"]={func:function(module, exports, global, require){${mod.code}\n},deps:${JSON.stringify(mod.deps)}};`
+		return `global.__Modules["${mod.id}"]={func:function(module, exports, global, __filename, __dirname, __root, require){${mod.code}\n},deps:${JSON.stringify(mod.deps)},fn:'${mod.fn}',dn:'${path.dirname(mod.fn)}', root:'${mod.root}'};`
 	}).join('\n');
 
 	const bundle = `
 if(typeof window !=='undefined') global=window;
-global.Modules = global.Modules||{};
-${modsAsString}
+global.__Modules = global.__Modules||{};
 (function(){
+	${modsAsString}
 	const req = (id)=>{
-		if(global.Modules[id].executed) return global.Modules[id].export;
+		const mod = global.__Modules[id];
+		if(mod.executed) return mod.export;
 		let m = {exports : {}};
-		global.Modules[id].func(m,m.exports,global,(reqPath)=>req(global.Modules[id].deps[reqPath]));
-		global.Modules[id].executed = true;
-		global.Modules[id].export = m.exports;
-		return global.Modules[id].export;
+		mod.func(m,m.exports,global,mod.fn,mod.dn,mod.root,(reqPath)=>req(mod.deps[reqPath]));
+		mod.executed = true;
+		mod.export = m.exports;
+		return mod.export;
 	}
 	if(typeof module === 'undefined'){
 		global['${opts.name}'] = req('${root.id}');
 	}else{
 		module.exports = req('${root.id}');
 	}
-})();`;
+})();`.replace(new RegExp('</script>','g'), '&lt;/script&gt;');
 
+	root.export = root.export || function(){};
 	return { bundle, modules, export : root.export, global : opts.global }
 };
 
-module.exports = (entryFilePath, opts={})=>{
-	//entryFilePath = require.resolve(entryFilePath, {paths: [path.dirname(getCaller().file)]});
-	entryFilePath = resolveFrom(entryFilePath, getCaller().file);
-	opts.transforms = {
-		...(opts.transforms||{}),
-		...baseTransforms,
-	};
+const PicoPack = (entryFilePath, opts={})=>{
+	entryFilePath = resolveFrom(entryFilePath, getCaller(opts.callOffset).file);
+
+	opts.transforms = { ...baseTransforms, ...(opts.transforms||{})};
 	opts.name = opts.name || 'main';
 	opts.global = opts.global || {};
 
 	let result = picopack(entryFilePath, {}, opts);
 
 	if(typeof opts.watch === 'function'){
+		opts.global = result.global;
 		const decache = (mod_id)=>{
 			if(!result.modules[mod_id]) return;
 			result.modules[mod_id].upstream.forEach(decache);
 			delete result.modules[mod_id];
 		};
-		const rebundle = debounce(()=>{
+		const rebundle = debounce((changedFilePath)=>{
 			result = picopack(entryFilePath, result.modules, opts);
-			opts.watch(result);
+			opts.global = result.global;
+			opts.watch(result, changedFilePath);
+			PicoPack.emitter.emit('update', entryFilePath);
 		});
 		Object.values(result.modules).map(mod=>{
-			fs.watch(mod.filepath, ()=>{ decache(mod.id); rebundle(); });
+			fs.watch(mod.filepath, ()=>{ decache(mod.id); rebundle(mod.filepath); });
 		});
 		opts.watch(result);
 	};
 	return result;
-}
+};
+
+PicoPack.emitter = Emitter();
+
+module.exports = PicoPack;

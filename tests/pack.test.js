@@ -12,10 +12,10 @@ const res = pack('./test_files/bar.js', {
 	//transforms : {},
 	//watch : ()=>{}
 
-	watch : (res)=>{
-		console.log('WATCH TRIGGER', res.export())
+	// watch : (res)=>{
+	// 	console.log('WATCH TRIGGER', res.export())
 
-	}
+	// }
 
 });
 
