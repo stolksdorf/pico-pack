@@ -1,11 +1,9 @@
-const fs = require('fs');
 const pack = require('../pico-pack.js');
 
-
-const bundleHTML = (path, watchFunc)=>{
+/* Returns a function that creates a HTML string */
+module.exports = (path, watchFunc=false)=>{
 	path = pack.resolveFromCaller(path);
 	let mod, bundle;
-
 	if(watchFunc){
 		pack.watch(path, (changedFile, _mod)=>{
 			mod = _mod;
@@ -38,26 +36,3 @@ const bundleHTML = (path, watchFunc)=>{
 		</html>`
 	}
 };
-
-const bundle = pack('./test_files/bar.js');
-
-console.log(bundle)
-
-
-
-
-
-// console.log('packed');
-// //console.log('result func:', res.func, func());
-
-
-
-
-
-// console.log('----------------------')
-
-// const foo = require('../temp/src.packed.js')
-
-// console.log(foo())
-
-
