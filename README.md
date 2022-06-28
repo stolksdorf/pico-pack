@@ -1,73 +1,54 @@
-# pico-pack
+# 📦 pico-pack
 
-Experiments in creating my own lightweight bundler
+> Incredibly light-weight javascript bundler
 
 
-features:
+
+### Features:
 - Really simple interface
-- Returns bundled code and the runnable exported result of the bundle (allowing you to implement serverside rendering for react and what not)
-- Implements some pretty smart cacheing and de-cacheing, making rebundles insanely quick.
-- Has dev builds, aka sets up file watchers and rebundles when a file has changed
-- Supports custom file transforms, including babel
+- Uses Node's `require.cache` for dependency introspection
+- `.watch` allows for rebundling when dependencies change
+- Supports custom file transforms
+- 115 lines of code, no external dependencies
 
 
 
-anti-features: (things I removed for simplicity)
-- Simply just returns the bundle text
-- No file streams
-- Fully syncronous
-- No bundle splitting
-- libs will be transformed (although could write a custom transform to check for that)
-- No tree-shaking or anything
+### How it Works
+
+- `pico-pack` proxies the `require` function in order to add needed information about each module. When you bundle a module, it packs up each of it's dependencies into a stand-alone ready-to-run string.
+- When you watch a module, when any of it's dependencies change, `pico-pack` de-caches all modules that depend on the changed file, then it runs the watch function.
+- Transforms update Nodes internal `Module` library for handling imports of specific extensions. It caches the transform onto the module instance, so if a transformed module gets bundled, it bundles the transformed version instead of the raw file.
 
 
 
-
-### Custom transforms with Cache example
+### Custom transform Example
 
 ```js
+const fs = require('node:fs');
+const { pack, addTransform } = require('pico-pack');
 
-const {bundle, cache, export} = pack('/path/to/component.js', {
-	transforms : {
-		'.css' : (code, fp, cache)=>{
-			cache.css = cache.css || {}
-			cache.css[fp] = parseCSS(code);
-			return '';
-		}
-	}
-});
+/* Transforms any require'd .png file into a base64 string */
+addTransform('.png', (code, filepath)=>{
+	const base64 = Buffer.from(fs.readFileSync(filepath)).toString('base64');
+	return `module.exports='data:image/png;base64,${base64}';`;
+})
 
-const resultHTML = `
-<html>
-	<head>
-		<style>${genCSS(cache.css)}</style>
-		<script>${bundle}</script>
-	</head>
-	<body>
-		${render(export())}
-	</body>
-</html>
-`
+const bundle = pack('./src/index.js');
 
+fs.writeFileSync('./build/bundle.js', bundle, 'utf8');
 ```
 
 
-### Sample Module Entry
+### Watch Example
 
 ```js
-{
-	234463 : {
-		id : '234463',
-		deps : {
-			{ './doot.js': '-2rg5hu' },
-		},
-		upstream : <Set of ids>
-		filepath : 'C:/root/pico-pack/tests/test_files/bar.js',
-		code : '...',
-		export : <func>
-	}
-}
+const fs = require('node:fs');
+const { pack, watch } = require('pico-pack');
 
 
-
+watch('./src/index.js', (changedFile)=>{
+	console.log(`${changedFile} file has changed`);
+	const bundle = pack('./src/index.js');
+	fs.writeFileSync('./build/bundle.js', bundle, 'utf8');
+});
 ```

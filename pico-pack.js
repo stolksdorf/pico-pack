@@ -1,85 +1,114 @@
-const vm   = require('vm');
-const fs   = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const Path = require('node:path');
+const Module = require('node:module');
 
-const hash = (str)=>[...str].reduce((acc, char)=>{acc = ((acc<<5)-acc)+char.charCodeAt(0);return acc&acc; }, 0).toString(32);
+Module.prototype.require = new Proxy(Module.prototype.require, {
+	apply(_, mod, [target]){
+		const targetPath = require.resolve(target, {paths:[mod.path]});
+		const _export = Reflect.apply(_, mod, [target]);
+		mod.deps = mod.deps||{};
+		mod.deps[target] = targetPath;
+		const child = require.cache[targetPath];
+		if(child){
+			child.parents = child.parents || [];
+			child.parents.push(mod.filename);
+		}
+		return _export;
+	}
+});
 
-const baseTransforms = {
-	'.json' : (code, filename)=>`module.exports=${code};`,
-	'.js'   : (code, filename)=>code,
-	'*'     : (code, filename)=>`module.exports=\`${code}\`;`
+/* Utils */
+const getCallStack = ()=>{
+	const _prepareStackTrace = Error.prepareStackTrace
+	Error.prepareStackTrace = (_, stack) => stack;
+	const stack = new Error().stack.slice(1);
+	Error.prepareStackTrace = _prepareStackTrace;
+	return stack;
+};
+const resolveFromCaller = (fp, offset=0)=>{
+	const callDir = Path.dirname(getCallStack()[2+offset].getFileName());
+	return require.resolve(fp, {paths:[callDir]});
+};
+const fixPath = (path)=>path.replace(process.cwd(), '').replaceAll('\\', '/');
+const mapDeps = (mod, func)=>{ func(mod); mod.children.map(dep=>mapDeps(dep, func)); };
+
+
+const packModule = (mod)=>{
+	if(!mod.content) mod.content = fs.readFileSync(mod.filename, 'utf8');
+	mod.content = mod.content.replaceAll('</script>','&lt;/script&gt;');
+	const depStr = Object.entries(mod.deps||{}).map(([k,v])=>`'${k}':'${fixPath(v)}'`).join(',\n');
+	return `{ func: function(module, exports, require){${mod.content};}, deps: {${depStr}} }`;
+};
+const packModules = (mod)=>{
+	let Modules = {};
+	mapDeps(mod, (dep)=>{
+		if(!Modules[dep.filename]){
+			Modules[dep.filename] = `global.__mods__['${fixPath(dep.filename)}']=${packModule(dep)};`;
+		}
+	});
+	return Modules;
 };
 
-const getCaller = (offset=0)=>{
-	const [_, name, file, line, col] =
-		/    at (.*?) \((.*?):(\d*):(\d*)\)/.exec((new Error()).stack.split('\n')[3 + offset]);
-	return { name, file, line : Number(line), col  : Number(col) };
-};
+const pack = (filename, opts={})=>{
+	opts = {name:'main', ...opts};
 
-module.exports = (entryFilePath, opts={})=>{
-	const {file} = getCaller();
-	entryFilePath = require.resolve(entryFilePath, {paths: [path.dirname(file)]});
+	filename = resolveFromCaller(filename);
+	require(filename);
 
-	let modules = {};
-	opts.transforms = {
-		...(opts.transforms||{}),
-		...baseTransforms,
-	};
-	opts.name = opts.name || 'main';
-	opts.global = opts.global || {};
-
-	const getCode = (filepath)=>{
-		const code = fs.readFileSync(filepath, 'utf8');
-		const funcKey = Object.keys(opts.transforms).find(key=>filepath.endsWith(key)) || '*'
-		const func = opts.transforms[funcKey];
-		//const func = opts.transforms[path.extname(filepath)] || opts.transforms['*'];
-		return func ? func(code, filepath, opts.global) : code;
-	};
-
-	const pack = (filepath, requiringId=false)=>{
-		let mod = { id : hash(filepath), deps : {}, filepath };
-		if(modules[mod.id]) return modules[mod.id];
-		mod.code = getCode(filepath);
-		const context = {
-			module  : {exports:{}}, exports : {},
-			global  : opts.global,
-			console, setTimeout, setInterval, clearInterval, process,
-			require: (reqPath)=>{
-				const reqMod = pack(require.resolve(reqPath, {paths: [path.dirname(filepath)]}), mod.id);
-				mod.deps[reqPath] = reqMod.id;
-				return reqMod.export;
-			},
+	let PackedModules = packModules(require.cache[filename]);
+	return `(function(){
+		if(typeof window !=='undefined') global=window;
+		global.__mods__ = global.__mods__||{};
+		${Object.values(PackedModules).join('\n')}
+		const _require = (path)=>{
+			const mod = global.__mods__[path];
+			if(mod.loaded) return mod.exports;
+			mod.exports = {};
+			mod.func(mod,mod.exports,(target)=>_require(mod.deps[target]));
+			mod.loaded = true;
+			return mod.exports;
 		};
-		vm.runInNewContext(mod.code, context, { filename : filepath });
-		mod.export = context.module.exports;
-		modules[mod.id] = mod;
-		return mod;
+		global['${opts.name}'] = _require('${fixPath(filename)}');
+		if(typeof module !== 'undefined') module.exports = global['${opts.name}'];
+	})();`;
+};
+
+const decache = (fp, stopAt=null)=>{
+	if(!require.cache[fp]) return;
+	if(stopAt !== fp) (require.cache[fp].parents||[]).map(decache);
+	delete require.cache[fp];
+};
+
+const watch = (filename, func)=>{
+	filename = resolveFromCaller(filename);
+	let watchers = {}, timer;
+	const run = async (changedFile)=>{
+		timer=null;
+		await func(changedFile, require(filename), filename);
+		mapDeps(require.cache[filename], (dep)=>{
+			if(watchers[dep.filename]) return;
+			watchers[dep.filename] = fs.watch(dep.filename, ()=>{
+				decache(dep.filename, filename);
+				if(!timer) timer=setTimeout(()=>run(dep.filename), 200);
+			})
+		});
 	};
+	run();
+};
 
-	const root = pack(entryFilePath);
+const addTransform = (ext, func)=>{
+	Module._extensions[ext] = (module, filename)=>{
+		const content = fs.readFileSync(filename, 'utf8');
+		module.content = func(content, filename);
+		module._compile(module.content, filename);
+	};
+};
 
-	const modsAsString = Object.values(modules).map((mod)=>{
-		return `global.Modules["${mod.id}"]={func:function(module, exports, global, require){${mod.code}\n},deps:${JSON.stringify(mod.deps)}};`
-	}).join('\n');
+addTransform('.json', (content)=>`module.exports=${content}`);
 
-	const bundle = `
-if(typeof window !=='undefined') global=window;
-global.Modules = global.Modules||{};
-${modsAsString}
-(function(){
-	const req = (id)=>{
-		if(global.Modules[id].ran) return global.Modules[id].export;
-		let m = {exports : {}};
-		global.Modules[id].func(m,m.exports,global,(reqPath)=>req(global.Modules[id].deps[reqPath]));
-		global.Modules[id].ran = true;
-		global.Modules[id].export = m.exports;
-		return global.Modules[id].export;
-	}
-	if(typeof module === 'undefined'){
-		global['${opts.name}'] = req('${root.id}');
-	}else{
-		module.exports = req('${root.id}');
-	}
-})();`
-	return { bundle, modules, export : root.export, global : opts.global }
-}
+module.exports = pack;
+module.exports.addTransform = addTransform;
+module.exports.watch = watch;
+module.exports.pack = pack;
+module.exports.resolveFromCaller = resolveFromCaller;
+module.exports.decache = decache;

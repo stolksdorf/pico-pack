@@ -1,7 +1,7 @@
-//const data = require('./data.json');
+const data = require('./data.json');
 
-global.foo= 7 ;
 
-//module.exports = 0 + data.a;
+global.foo= 8 ;
 
-module.exports = 0;
+module.exports = 0 + data.a;
+
